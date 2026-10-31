@@ -1,0 +1,51 @@
+{
+  "name": "dsh-approval-timeout",
+  "version": "1.0.0",
+  "private": false,
+  "type": "module",
+  "description": "Auto-rejects an unanswered approval prompt after a configurable timeout (default 10 minutes).",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "approval",
+    "timeout",
+    "safety"
+  ],
+  "license": "MIT",
+  "author": "EviMing",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EviMing/dsh-approval-timeout.git"
+  },
+  "homepage": "https://github.com/EviMing/dsh-approval-timeout#readme",
+  "bugs": {
+    "url": "https://github.com/EviMing/dsh-approval-timeout/issues"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-approval"
+      ]
+    }
+  }
+}
