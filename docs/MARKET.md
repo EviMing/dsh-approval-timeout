@@ -70,7 +70,7 @@ git push -u origin add-dsh-approval-timeout
 # 4) 开 PR（标题 "Add dsh-approval-timeout"）
 gh pr create --repo awesome-dsh-plugin/awesome-dsh-plugin \
   --title "Add dsh-approval-timeout" \
-  --body "Auto-rejects an unanswered approval prompt in the dsh Web UI after a configurable timeout (default 10 minutes, adjustable under the composer). Reject-only by design: no code path approves, no network or file access. Repo: https://github.com/EviMing/dsh-approval-timeout"
+  --body "Answers an unanswered approval (rejected) or question (empty selection) in the dsh Web UI after a configurable timeout (default 10 minutes, adjustable under the composer). Reject/skip only: no code path approves and no reply is fabricated, no network or file access. Repo: https://github.com/EviMing/dsh-approval-timeout"
 ```
 
 不用 `gh` 也可以：fork 后在网页上加文件、开 PR，效果一样。

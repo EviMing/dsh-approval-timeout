@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Approval Timeout",
-    "description": "Auto-rejects an approval prompt that stays unanswered for the configured time (default 10 minutes; change it under the composer)."
+    "title": "Approval/Question Timeout",
+    "description": "Rejects an approval or skips a question that stays unanswered for the configured time (default 10 minutes; change it under the composer)."
   }
 }

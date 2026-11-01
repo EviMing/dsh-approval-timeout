@@ -1,81 +1,91 @@
 # dsh-approval-timeout
 
-给 DeepSeek Harness（dsh）Web UI 的授权提示加一个截止时间：**超过设定时间没人点「允许/拒绝」，就自动按「拒绝」处理**。默认 **10 分钟**，可随时改。
+授权提示 / 提问提示的超时自动处理（DeepSeek Harness Web UI 插件）。
 
 English: [README.en.md](README.en.md)
 
 ## 行为
 
-- 任何需要你点头的动作（跑命令、写文件、装插件……）都会弹出授权面板；本插件给它计时。
-- 到点自动拒绝，和你亲手点「拒绝」完全一样：面板消失、工具调用以拒绝结束、写入同一条 `rejected` 审计事件。
-- 只会拒绝，**永远不会自动放行**——超时后 fail closed。
-- 没有审批在等时插件完全静默；选「关闭」即恢复 dsh 原生行为（无限等待）。
+Harness 在浏览器里等用户点击时会一直阻塞。本插件给这两种等待都加了截止时间，默认 **10 分钟**：
+
+- **授权**（`approval`）：超时未点击即自动按「拒绝」处理，等价于你自己点了「拒绝」——
+  写入同样的 `approval/decided: rejected` 审计事件，面板消失，工具调用以拒绝结束（fail closed）。
+- **提问**（`ask_user_question`）：超时未回答即自动按「跳过」处理——等价于你把每道题都留空点
+  「跳过」，agent 收到的是 `{ answers: [{ id, selected: [] }, ...] }`，也就是明确的「用户没作答」，
+  不会被当成默许，也不会伪造一个回复；面板消失，工具返回空答案并继续。
+  如果你正在作答（面板聚焦 / 输入框编辑中），截止时间会顺延 60 秒，不打断手里的答案。
+
+没有等待时插件完全静默。选「关闭」即恢复 dsh 原生行为（无限等待）。
 
 ## 安装
 
 ```bash
-dsh plugin --profile web add github:EviMing/dsh-approval-timeout   # 从 GitHub 安装
-# 或发布到 npm 之后：
+dsh plugin --profile web add github:EviMing/dsh-approval-timeout
+# 或用 npm 包（如有发布）：
 dsh plugin --profile web add dsh-approval-timeout
 ```
 
-装完重启 / 刷新 `dsh web` 页面，输入框下方会出现控件：
+重启 / 刷新 `dsh web`。输入框（composer）下方会出现一行：
 
 ```
-审批超时自动拒绝   [10 分钟 ▾]
+审批/提问超时   [10 分钟 ▾]
 ```
 
 ## 使用
 
-- 下拉框调整时间：**关闭 / 1 / 3 / 5 / 10 / 15 / 30 / 60 分钟**，选完立即生效并记住。
-- 有审批在等待时，这一行变黄并显示倒计时，例如 `bash：9:58 后自动拒绝`。
-- 时间存在浏览器 `localStorage` 的 `dsh.approval-timeout.minutes` 里，按浏览器 profile 持久化（不写服务端配置，不改 profile 的 patch）。
+- 下拉框调时间：**关闭 / 1 / 3 / 5 / 10 / 15 / 30 / 60 分钟**，立即生效并记住。
+- 有授权在等待时，这一行变成黄色并显示倒计时，例如 `bash: 9:58 后自动拒绝`。
+- 有提问在等待时同样变黄，例如 `提问：9:58 后自动跳过`。
+- 设置存在浏览器 `localStorage`（键 `dsh.approval-timeout.minutes`）：按浏览器 profile 持久化，
+  没有服务端配置，也不改任何 profile 文件。
+
+## 不会被接管的等待
+
+只处理「当前真的阻塞着 agent、且面板还活着」的请求，其余一律不碰：
+
+- 已结算、只读的提问卡片（没有回答通道，回答它等于向 agent 注入不存在的回复）；
+- 已经断开实时通道的旧卡片（`continued`）；
+- 客户端自己已有倒计时的提问（`ask_user_question` 的 timed 模式）；
+- 计划审批（`plan-review`）**故意不自动跳过**：它唯一非批准的结果是「继续规划」，agent 会改完
+  再提一次，超时只会变成反复循环，所以这里宁可按原生无限等待；
+- 没有 callId、又无法取消的卡片（只收起面板，不结束请求）。
 
 ## 为什么在客户端实现
 
-授权面板由 `@deepseek-ai/dsh-client-ui-approval` 在浏览器里渲染；宿主侧的 `approval/request` waterfall 只负责把请求转给浏览器并等待客户端作答，网关只在「客户端作答」或「请求 signal 中止」时收尾。若插件在宿主抢先返回 `'rejected'`：工具已被拒绝，但面板不会消失，你之后再点按钮只会变成空操作。
+授权面板由 `@deepseek-ai/dsh-client-ui-approval`、提问面板由 `@deepseek-ai/dsh-client-ui-user-questions`
+在浏览器里渲染。HOST 侧的 `approval/request`、`user-questions/request` waterfall 只负责把请求转发给
+浏览器并等待客户端作答；gateway 只在「客户端作答」或「请求 signal 中止」时收尾。如果插件在 HOST 侧
+抢先 return，面板不会消失、工具却已经结束，用户之后再点按钮就变成空操作。
 
-所以本插件读取 `ctx.uiSession.sessionStatus` 中当前会话的 `pendingInteraction`（即那个 `PendingApproval` 实例），到点调用它自己的 `pending.answer('rejected')`——与用户点击走同一条路径，审计、面板、工具结果三者一致。
+因此本插件直接读取 `ctx.uiSession.sessionStatus` 里当前会话的 `pendingInteraction`（即真实的
+`PendingApproval` / `PendingQuestion` 实例），到点调用它自己的方法——`pending.answer('rejected')`
+（授权）、`pending.answer({ answers: [...] })`（提问）、或 `pending.dismiss()`（无法回答、只能取消的
+卡片）——和用户点按钮走完全同一条路径，审计、面板与工具结局因此保持一致。
 
 ## 安全
 
-- 只做「拒绝」，不做「批准」；不存在超时放行的代码路径。
-- 无网络请求，不读凭据，不写会话事件，不碰 `document.body`。
-- 唯一副作用：调一次 `answer('rejected')` 并在 `localStorage` 存一个整数。
-- 撤销：`dsh plugin --profile web remove dsh-approval-timeout`（或插件管理里停用），刷新即可，无残留。
+- 永远只会「拒绝」或「跳过」，没有任何自动批准的代码路径。
+- 无网络请求、不读凭据、不发会话事件、不写 `document.body`。
+- 只有两类副作用：一次 `pending.answer(...)` 调用，以及 `localStorage` 里的一个整数。
+- 卸载：`dsh plugin --profile web remove dsh-approval-timeout`（或在插件页禁用）后刷新，不留残留。
 
-## 开发与自测
+## 开发
 
 ```bash
 node verify/offline.mjs
 ```
 
-离线自测不需要浏览器：用假的 `window.__ModuleLoader__`、React、Client services 和一个会记录调用的假 `PendingApproval` 驱动 `client.js`，断言
-
-1. 默认计时是 10 分钟；
-2. 有待审批时渲染倒计时文案；
-3. 改成 1 分钟后按原始开始时间重排；
-4. 到点只调用一次 `answer('rejected')`；
-5. 选「关闭」时任何审批都不被动。
+离线自测不需要浏览器：它用假的 `window.__ModuleLoader__`、React、Client services、假
+`PendingApproval` 与假 `PendingQuestion` 驱动 `client.js`，覆盖默认 10 分钟、倒计时文案、
+改时间后重排、到点审批 `answer('rejected')`、多选题一次发出跳过批、rpc/continued/timed/只读卡
+/plan 卡不跟踪、编辑中顺延 60 秒、无 callId 卡只 `dismiss()`、以及选「关闭」时完全不动。
 
 ## 兼容性
 
-实测环境：dsh `0.2.0-rc.2`（`dsh web`），依赖的客户端包为
-`@deepseek-ai/dsh-client-ui-session` 与 `@deepseek-ai/dsh-client-ui-approval`（两者的 `pendingInteraction` 契约）。
-桌面版 dsh 若自带更老的 dsh，可能没有 `uiSession.sessionStatus`，此时插件会静默不生效（不会报错）。
-
-## 目录
-
-| 文件 | 作用 |
-| --- | --- |
-| `package.json` | bundle 清单：`dsh.bundle.patch` + `dsh.client`（web 客户端半） |
-| `cordis.patch.yml` | 插入 Loader 行 `approval-timeout` |
-| `index.js` | 宿主半：空 `apply()`，只为让客户端模块随包加载 |
-| `client.js` | 客户端半：计时、倒计时、自动拒绝、下拉设置 |
-| `locale/{zh,en}.json` | 插件列表里的名称与描述 |
-| `verify/offline.mjs` | 离线自测 |
-| `docs/MARKET.md` | 上架插件市场要做的步骤与门槛 |
-| `docs/marketplace-entry.yml` | 提交给 awesome-dsh-plugin 清单的条目文件 |
+在 dsh `0.2.0-rc.2`（`dsh web`）上测试，依赖 `@deepseek-ai/dsh-client-ui-session`、
+`@deepseek-ai/dsh-client-ui-approval`，提问部分与 `@deepseek-ai/dsh-client-ui-user-questions` 协作
+（按鸭子类型读取，不强制注入）。桌面版若捆绑了更旧的 dsh、缺少 `uiSession.sessionStatus`，
+插件会保持静默而不是报错。
 
 ## License
 

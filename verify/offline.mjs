@@ -118,6 +118,51 @@ function showPending(approval) {
 
 showPending(pending);
 
+// --- fake pending question -------------------------------------------------
+// Mirrors the fields `client.js` reads from a real PendingQuestion: `kind`,
+// `key`, `questions`, an optional read-only `review`, and a `snapshot()` that
+// reports the answer channel. `answer()` records the batch instead of settling.
+const questionAnswers = [];
+
+function makeQuestion(key, questions, options = {}) {
+  return {
+    sessionId,
+    kind: options.kind ?? 'question',
+    key,
+    questions,
+    callId: 'call-q',
+    review: options.review,
+    dismissal: options.dismissal ?? 'hide',
+    channel: options.channel ?? 'waterfall',
+    waitState: options.waitState ?? 'counting',
+    countdown: options.countdown,
+    closed: options.closed === true,
+    snapshot() {
+      return {
+        state: this.channel === 'rpc' ? 'continued' : 'open',
+        waitState: this.waitState,
+        countdown: this.countdown,
+        channel: this.channel,
+        closed: this.closed,
+      };
+    },
+    dismissed: 0,
+    dismiss() {
+      this.dismissed += 1;
+      pendingSnapshot = new Map();
+      for (const listener of [...statusListeners]) listener();
+      return Promise.resolve();
+    },
+    answer(payload) {
+      questionAnswers.push(payload);
+      pendingSnapshot = new Map();
+      for (const listener of [...statusListeners]) listener();
+      return Promise.resolve(payload);
+    },
+  };
+}
+
+
 // --- fake client services --------------------------------------------------
 let captured = undefined;
 let dictionaries;
@@ -267,5 +312,111 @@ ok(timers.length === 0, 'no timer while off, got ' + timers.length);
 ok(answered.length === 0, 'off must not answer anything');
 ok(errors.length === 0, `no internal errors expected, got: ${errors.join(' | ')}`);
 
+// --- questions -------------------------------------------------------------
+// Re-enable at 5 minutes. The idle chip carries the plugin's label; the picker
+// still offers every choice.
+const flush = () => new Promise((resolve) => realSetTimeout(resolve, 0));
+pendingSnapshot = new Map();
+picker().props.onChange({ target: { value: '5' } });
+ok(localStorage.getItem('dsh.approval-timeout.minutes') === '5', 'question section starts at 5 minutes');
+ok(chip() === '审批/提问超时', `idle chip was ${JSON.stringify(chip())}`);
+
+// A live question is tracked exactly like an approval.
+const question = makeQuestion('question:s1:call-9', [
+  { id: 'q1', question: 'Which one?', header: 'Choose' },
+  { id: 'q2', question: 'Why?' },
+]);
+timers = [];
+questionAnswers.length = 0;
+showPending(question);
+ok(timers.length === 1, `expected one question timer, got ${timers.length}`);
+ok(Math.abs(timers[0].ms - 5 * 60 * 1000) < 1500, `question delay was ${timers[0].ms}`);
+ok(/^提问：\d+:\d\d 后自动跳过$/.test(chip()), `question chip was ${JSON.stringify(chip())}`);
+
+// Firing it sends the exact batch the panel sends when every question is skipped.
+timers[0].fn();
+await flush();
+deepStrictEqual(
+  questionAnswers,
+  [{ answers: [{ id: 'q1', selected: [] }, { id: 'q2', selected: [] }] }],
+  'question timeout must submit a skip batch',
+);
+ok(chip() === '审批/提问超时', `chip must return to idle, got ${JSON.stringify(chip())}`);
+ok(intervals.length === 0, `ticker should stop, got ${intervals.length}`);
+
+// A continued card (rpc channel) no longer blocks the agent: never answer it for the user.
+timers = [];
+questionAnswers.length = 0;
+showPending(makeQuestion('question:s1:call-10', [{ id: 'q1', question: 'old?' }], { channel: 'rpc' }));
+ok(timers.length === 0, `continued question must not be tracked, got ${timers.length}`);
+ok(chip() === '审批/提问超时', 'continued question must stay idle');
+
+// A card the Host never named has no tool-call row to reopen it: at the deadline the
+// only way out is closing it, which ends the request instead of faking an answer.
+timers = [];
+questionAnswers.length = 0;
+const unnamed = makeQuestion("question:s1:unnamed", [{ id: "q1", question: "blocked?" }], { dismissal: "cancel", channel: "none" });
+showPending(unnamed);
+ok(timers.length === 1, `unnamed blocking question is tracked, got ${timers.length}`);
+timers[0].fn();
+await flush();
+ok(unnamed.dismissed === 1, `unnamed card must be cancelled, got ${unnamed.dismissed}`);
+ok(questionAnswers.length === 0, "cancelling must not fake an answer");
+// A timed question already owns its countdown in the Client: do not double-own it.
+timers = [];
+showPending(makeQuestion('question:s1:call-11', [{ id: 'q1', question: 'timed?' }], {
+  countdown: { remainingMs: 60 * 1000, running: true },
+}));
+ok(timers.length === 0, `timed question must not be tracked, got ${timers.length}`);
+
+// A settled review card is read-only, and a closed card is gone.
+timers = [];
+showPending(makeQuestion('question:s1:call-12', [{ id: 'q1', question: 'plan?' }], {
+  kind: 'plan-review',
+  review: { approved: false },
+}));
+ok(timers.length === 0, `review card must not be tracked, got ${timers.length}`);
+showPending(makeQuestion('question:s1:call-13', [{ id: 'q1', question: 'gone?' }], { closed: true }));
+ok(timers.length === 0, `closed card must not be tracked, got ${timers.length}`);
+
+// Somebody editing the answer gets a one-minute slip, not a skipped question.
+timers = [];
+questionAnswers.length = 0;
+const editing = makeQuestion('question:s1:call-14', [{ id: 'q1', question: 'type here' }], { waitState: 'editing' });
+showPending(editing);
+ok(timers.length === 1, `editing question is still tracked, got ${timers.length}`);
+const firedWhileEditing = timers[0];
+timers = [];
+firedWhileEditing.fn();
+ok(questionAnswers.length === 0, 'an answer being edited must not be thrown away');
+ok(timers.length === 1, `expected a snoozed timer, got ${timers.length}`);
+ok(Math.abs(timers[0].ms - 60 * 1000) < 1500, `snooze was ${timers[0].ms}`);
+ok(/^提问：\d+:\d\d 后自动跳过$/.test(chip()), `snoozed chip was ${JSON.stringify(chip())}`);
+editing.waitState = 'counting';
+timers[0].fn();
+await flush();
+deepStrictEqual(questionAnswers, [{ answers: [{ id: 'q1', selected: [] }] }], 'skipped after the snooze');
+
+// A plan review is deliberately left alone: its only "not now" outcome tells the
+// agent to revise and present again, so timing it out would loop instead of unblock.
+timers = [];
+questionAnswers.length = 0;
+showPending(makeQuestion('question:s1:call-15', [{ id: 'plan', question: 'Approve the plan?' }], { kind: 'plan-review' }));
+ok(timers.length === 0, `plan review must not be tracked, got ${timers.length}`);
+ok(questionAnswers.length === 0, 'plan review must never be answered for the user');
+ok(chip() === '审批/提问超时', `plan review chip was ${JSON.stringify(chip())}`);
+
+// Turning it off also leaves questions alone.
+timers = [];
+questionAnswers.length = 0;
+picker().props.onChange({ target: { value: '0' } });
+ok(timers.length === 0, `off must drop pending timers, got ${timers.length}`);
+showPending(makeQuestion('question:s1:call-16', [{ id: 'q1', question: 'off?' }]));
+ok(timers.length === 0, `off must not track questions, got ${timers.length}`);
+ok(questionAnswers.length === 0, 'off must not answer a question');
+ok(chip() === '审批/提问超时', 'off keeps the chip idle');
+
+ok(errors.length === 0, `no internal errors expected, got: ${errors.join(' | ')}`);
+
 console.error = realConsoleError;
-console.log('offline harness passed: 10-minute default, countdown render, picker follows every choice (idle and pending), 1-minute reschedule, auto-reject via answer("rejected"), off = untouched');
+console.log('offline harness passed: 10-minute default, approval countdown + auto-reject, multi-question skip batch, 1-minute snooze while editing, continued/timed/review/plan cards left alone, off = untouched');

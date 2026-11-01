@@ -1,15 +1,16 @@
 {
   "name": "dsh-approval-timeout",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "private": false,
   "type": "module",
-  "description": "Auto-rejects an unanswered approval prompt after a configurable timeout (default 10 minutes).",
+  "description": "Auto-rejects an unanswered approval prompt and auto-skips an unanswered question after a configurable timeout (default 10 minutes).",
   "keywords": [
     "dsh",
     "dsh-plugin",
     "deepseek-harness",
     "cordis",
     "approval",
+    "question",
     "timeout",
     "safety"
   ],
@@ -38,7 +39,9 @@
     "LICENSE"
   ],
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,

@@ -9,22 +9,26 @@ window.__ModuleLoader__.load({
     const DEFAULT_MINUTES = 10;
     const MAX_MINUTES = 240;
     const MINUTE = 60 * 1000;
+    /** While the user is answering, the deadline slips by this much instead of firing. */
+    const SNOOZE_MS = 60 * 1000;
     /** Offered choices, in minutes; 0 turns the behavior off. */
     const OPTIONS = [0, 1, 3, 5, 10, 15, 30, 60];
 
     const zh = {
-      label: '审批超时自动拒绝',
+      label: '审批/提问超时',
       off: '关闭',
       minutes: '{n} 分钟',
-      pending: '{tool}：{time} 后自动拒绝',
-      hint: '授权提示超过该时间仍未响应时自动拒绝',
+      approvalPending: '{tool}：{time} 后自动拒绝',
+      questionPending: '提问：{time} 后自动跳过',
+      hint: '授权提示或提问超过该时间仍无人响应时自动处理：授权按拒绝，提问按跳过（正在作答时顺延）',
     };
     const en = {
-      label: 'Approval auto-reject',
+      label: 'Approval/question timeout',
       off: 'Off',
       minutes: '{n} min',
-      pending: '{tool}: auto-reject in {time}',
-      hint: 'Rejects an approval prompt left unanswered for this long',
+      approvalPending: '{tool}: auto-reject in {time}',
+      questionPending: 'Question: auto-skip in {time}',
+      hint: 'Answers an approval with reject, and skips a question, when nobody responds in time; slips while you are answering',
     };
 
     /** Read the persisted timeout, falling back to the default. */
@@ -72,6 +76,18 @@ window.__ModuleLoader__.load({
       cursor: 'pointer',
     };
 
+    /** Read a pending question's card state; older Clients may not expose one. */
+    function readState(pending) {
+      if (typeof pending.snapshot !== 'function') return undefined;
+      try {
+        const state = pending.snapshot();
+        return state !== null && typeof state === 'object' ? state : undefined;
+      } catch (error) {
+        console.error('[approval-timeout] could not read the pending interaction state', error);
+        return undefined;
+      }
+    }
+
     return {
       inject: ['uiSession', 'slots', 'locale'],
       apply(ctx) {
@@ -79,10 +95,12 @@ window.__ModuleLoader__.load({
         const uiSession = ctx.uiSession;
 
         let minutes = readMinutes();
-        /** key -> { key, sessionId, toolName, pending, startedAt, deadline } */
+        /** key -> { key, sessionId, kind, label, pending, startedAt, deadline } */
         const entries = new Map();
         /** key -> timeout handle */
         const timers = new Map();
+        /** key -> answered-at; keeps a card that lingers after being answered from being re-tracked. */
+        const settled = new Map();
         const listeners = new Set();
         let ticker = null;
         let revision = 0;
@@ -104,7 +122,8 @@ window.__ModuleLoader__.load({
           for (const entry of entries.values()) {
             pendings.push({
               sessionId: entry.sessionId,
-              toolName: entry.toolName,
+              kind: entry.kind,
+              label: entry.label,
               remaining: Math.max(0, entry.deadline - now),
             });
           }
@@ -125,7 +144,7 @@ window.__ModuleLoader__.load({
           const delay = Math.max(0, entry.deadline - Date.now());
           timers.set(entry.key, setTimeout(() => {
             timers.delete(entry.key);
-            reject(entry.key);
+            settle(entry.key);
           }, delay));
         }
 
@@ -139,26 +158,98 @@ window.__ModuleLoader__.load({
           }
         }
 
-        /** Answer one tracked pending approval with `rejected`. */
-        function reject(key) {
+        /** Stop tracking one interaction without answering it. */
+        function untrack(key) {
+          if (!entries.delete(key)) return;
+          clearTimer(key);
+          syncTicker();
+          publish();
+        }
+
+        /** Answer one tracked interaction, then stop tracking it. */
+        function answer(key, payload) {
           const entry = entries.get(key);
           if (entry === undefined) return;
           entries.delete(key);
           clearTimer(key);
+          settled.set(key, Date.now());
           syncTicker();
           const pending = entry.pending;
-          if (pending.answerable === false || typeof pending.answer !== 'function') {
+          if (typeof pending.answer !== 'function') {
             publish();
             return;
           }
           try {
-            Promise.resolve(pending.answer('rejected')).catch((error) => {
-              console.error('[approval-timeout] the auto-reject answer was rejected', error);
+            Promise.resolve(pending.answer(payload)).catch((error) => {
+              console.error('[approval-timeout] the automatic answer was rejected', error);
             });
           } catch (error) {
-            console.error('[approval-timeout] could not answer the pending approval', error);
+            console.error('[approval-timeout] could not answer the pending interaction', error);
           }
           publish();
+        }
+
+        /** The answer batch a user gets by skipping every question in the panel. */
+        function skipAll(pending) {
+          const questions = Array.isArray(pending.questions) ? pending.questions : [];
+          const answers = [];
+          for (const question of questions) {
+            if (question === undefined || question === null) continue;
+            if (question.id === undefined || question.id === null) continue;
+            answers.push({ id: question.id, selected: [] });
+          }
+          return answers.length === 0 ? undefined : { answers };
+        }
+
+        /** Deadline reached: settle the interaction the way a user's click would. */
+        function settle(key) {
+          const entry = entries.get(key);
+          if (entry === undefined) return;
+          const pending = entry.pending;
+
+          if (entry.kind === 'approval') {
+            if (pending.answerable === false) {
+              untrack(key);
+              return;
+            }
+            answer(key, 'rejected');
+            return;
+          }
+
+          // Only a live waterfall request still blocks the agent. A continued or
+          // dismissed card is a leftover: answering it would inject a reply the agent
+          // never asked for, so drop it instead of fabricating one.
+          const state = readState(pending);
+          if (state === undefined || state.channel !== 'waterfall') {
+            // A card the Host never named cannot be reopened from its tool call row, so
+            // closing it is the only way out and ends the request; a named card stays
+            // reachable from that row, so leaving it untouched loses nothing.
+            if (pending.dismissal === 'cancel' && typeof pending.dismiss === 'function') {
+              try {
+                Promise.resolve(pending.dismiss()).catch((error) => {
+                  console.error('[approval-timeout] could not cancel the pending question', error);
+                });
+              } catch (error) {
+                console.error('[approval-timeout] could not cancel the pending question', error);
+              }
+            }
+            untrack(key);
+            return;
+          }
+          // Somebody is typing or holding the panel open: slip the deadline instead of
+          // throwing their answer away mid-edit.
+          if (state.waitState === 'focused' || state.waitState === 'editing' || state.waitState === 'waiting') {
+            entry.deadline = Date.now() + SNOOZE_MS;
+            schedule(entry);
+            publish();
+            return;
+          }
+          const payload = skipAll(pending);
+          if (payload === undefined) {
+            untrack(key);
+            return;
+          }
+          answer(key, payload);
         }
 
         function trackKey(sessionId, pending, index) {
@@ -168,7 +259,7 @@ window.__ModuleLoader__.load({
           return `${String(sessionId)}|${identity}`;
         }
 
-        /** Reconcile tracked approvals with the Client's live pending interactions. */
+        /** Reconcile tracked interactions with the Client's live pending interactions. */
         function sync() {
           let changed = false;
           const live = new Map();
@@ -181,17 +272,41 @@ window.__ModuleLoader__.load({
           }
           if (status instanceof Map) {
             let index = 0;
+            const staleBefore = Date.now() - 10 * MINUTE;
+            for (const [key, at] of settled) {
+              if (at < staleBefore) settled.delete(key);
+            }
             for (const [sessionId, value] of status) {
               index += 1;
               const pending = value === undefined || value === null ? undefined : value.pendingInteraction;
               if (pending === undefined || pending === null) continue;
-              if (pending.kind !== 'approval' || typeof pending.answer !== 'function') continue;
+              if (typeof pending.answer !== 'function') continue;
+              let label;
+              if (pending.kind === 'approval') {
+                if (pending.answerable === false) continue;
+                label = typeof pending.toolName === 'string' && pending.toolName !== ''
+                  ? pending.toolName
+                  : undefined;
+              } else if (pending.kind === 'question') {
+                // `review` marks a settled, read-only record card: nothing waits on it.
+                if (pending.review !== undefined && pending.review !== null) continue;
+                // A plan review is excluded on purpose: its only "not now" outcome tells the
+                // agent to revise and present again, so a timeout there would loop instead
+                // of unblocking.
+                const state = readState(pending);
+                if (state !== undefined) {
+                  // A continued card no longer blocks anything, and a timed question
+                  // already owns its own countdown — leave both to the Client.
+                  if (state.state === 'continued' || state.closed === true) continue;
+                  if (state.channel === 'rpc' || state.countdown !== undefined) continue;
+                }
+              } else {
+                continue;
+              }
               if (minutes <= 0) continue;
               const key = trackKey(sessionId, pending, index);
-              const toolName = typeof pending.toolName === 'string' && pending.toolName !== ''
-                ? pending.toolName
-                : undefined;
-              live.set(key, { key, sessionId, toolName, pending });
+              if (settled.has(key)) continue;
+              live.set(key, { key, sessionId, kind: pending.kind, label, pending });
             }
           }
           for (const key of [...entries.keys()]) {
@@ -227,9 +342,9 @@ window.__ModuleLoader__.load({
             schedule(entry);
           }
           sync();
-          // `sync()` only republishes when the set of tracked approvals changes, so a bare
-          // timeout edit (nothing pending, or the same approval still pending) would leave
-          // every subscriber — including the picker itself — showing the old value.
+          // `sync()` only republishes when the set of tracked interactions changes, so a
+          // bare timeout edit (nothing pending, or the same interaction still pending)
+          // would leave every subscriber — including the picker — showing the old value.
           publish();
         }
 
@@ -253,9 +368,18 @@ window.__ModuleLoader__.load({
           const mine = sessionId === undefined
             ? undefined
             : state.pendings.find((pending) => pending.sessionId === sessionId);
-          const text = mine === undefined
-            ? t('label')
-            : t('pending', { tool: mine.toolName === undefined ? t('label') : mine.toolName, time: formatRemaining(mine.remaining) });
+          let text = t('label');
+          if (mine !== undefined) {
+            const time = formatRemaining(mine.remaining);
+            if (mine.kind === 'approval') {
+              text = t('approvalPending', {
+                tool: mine.label === undefined ? t('label') : mine.label,
+                time,
+              });
+            } else {
+              text = t('questionPending', { time });
+            }
+          }
           return h('div', { style: mine === undefined ? hintStyle : pendingStyle },
             h('span', { title: t('hint') }, text),
             h('select', {
@@ -287,7 +411,7 @@ window.__ModuleLoader__.load({
             entries.clear();
             listeners.clear();
           };
-        }, 'approval-timeout: pending approval timers');
+        }, 'approval-timeout: pending interaction timers');
 
         ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
           name: 'conversation.composer.dock',

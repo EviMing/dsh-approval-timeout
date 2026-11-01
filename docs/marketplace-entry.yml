@@ -2,5 +2,5 @@ url: https://github.com/EviMing/dsh-approval-timeout
 name: EviMing/dsh-approval-timeout
 category: ui
 description:
-  en: 'Auto-rejects an approval prompt in the dsh Web UI that stays unanswered past a configurable timeout (default 10 minutes; Off/1/3/5/10/15/30/60 min under the composer). Reject-only, so a stale prompt can never turn into an approval. No network and no file access; the only effects are one client-side answer("rejected") and one localStorage integer.'
-  zh: '给 DSH 的申请权限加上超时限制，防止没人在的时候一直卡在授权界面'
+  en: 'Answers an unanswered approval or question in the dsh Web UI past a configurable timeout (default 10 minutes; Off/1/3/5/10/15/30/60 min under the composer). An approval is answered with "rejected" and a question with an empty selection, exactly as the panel buttons would, so a stale prompt can never turn into an approval or a fabricated reply. No network and no file access; the only effects are one client-side answer call and one localStorage integer.'
+  zh: '给 DSH 的授权与提问加上超时：到点授权按拒绝、提问按跳过（等同面板按钮），防止没人在的时候一直卡在授权或提问界面；不会自动批准，也不伪造回答'
