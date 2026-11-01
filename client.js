@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: 'dsh-approval-timeout',
+  id: '@local/approval-timeout',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
@@ -227,6 +227,10 @@ window.__ModuleLoader__.load({
             schedule(entry);
           }
           sync();
+          // `sync()` only republishes when the set of tracked approvals changes, so a bare
+          // timeout edit (nothing pending, or the same approval still pending) would leave
+          // every subscriber — including the picker itself — showing the old value.
+          publish();
         }
 
         function useSnapshot() {
