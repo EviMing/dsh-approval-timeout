@@ -1,6 +1,6 @@
 {
   "name": "dsh-approval-timeout",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": false,
   "type": "module",
   "description": "Auto-rejects an unanswered approval prompt after a configurable timeout (default 10 minutes).",
